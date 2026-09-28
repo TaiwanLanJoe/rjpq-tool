@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>楓之谷 · 羅朱跳台協作工具 (狗男女)</title>
+  <meta name="description" content="羅朱PQ跳台協作工具 — Google Sheet 即時記錄，4人多人協作標記路線，輕鬆通關！">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+  <!-- 若尚未設定 Google Sheet 網址時的提示橫幅 -->
+  <div id="demoNotice" class="demo-banner" style="display: none;">
+    ⚠️ 目前未設定 Google Sheet 網址，已進入【本機模擬演示模式】。<a href="教學與說明.md" target="_blank">點此查看 Google Sheet 設置教學</a>
+  </div>
+
+  <div class="home-container">
+    <div class="card glass-card">
+      <div class="logo-area">
+        <div class="logo-icon">🍄</div>
+        <h1 class="title">楓之谷 · 羅朱跳台協作</h1>
+        <p class="subtitle">狗男女 PQ 10×4 跳台即時標記 · Google Sheet 支援</p>
+      </div>
+
+      <!-- 建立房間 -->
+      <div class="section">
+        <div class="input-group" style="margin-bottom: 12px;">
+          <input type="text" id="createPwdInput" placeholder="自訂4位密碼 (留空隨機生成)" maxlength="4" inputmode="numeric">
+        </div>
+        <button class="btn btn-primary" id="btnCreateRoom" onclick="handleCreateRoom()">
+          <span>✨</span> <span>建立新房間</span>
+        </button>
+      </div>
+
+      <div class="divider"><span>或 加入已有房間</span></div>
+
+      <!-- 加入房間 -->
+      <div class="section">
+        <div class="input-group" style="margin-bottom: 12px;">
+          <input type="text" id="roomCodeInput" placeholder="輸入6位房號" maxlength="6" inputmode="numeric" style="flex: 1.2;">
+          <input type="text" id="joinPwdInput" placeholder="4位密碼" maxlength="4" inputmode="numeric" style="flex: 0.8;">
+        </div>
+        <button class="btn btn-secondary" id="btnJoinRoom" onclick="handleJoinRoom()" style="width: 100%;">
+          <span>🚪</span> <span>進入房間</span>
+        </button>
+      </div>
+
+      <!-- 玩法說明 -->
+      <div class="how-to-use">
+        <h3>💡 使用教學</h3>
+        <ol>
+          <li>隊長建立房間後，將網址或房號密碼傳給隊友。</li>
+          <li>隊友開啟連結直接加入，或手動輸入 6 位房號與密碼。</li>
+          <li>每位玩家在頂部選取自己的角色編號（101 ～ 104）。</li>
+          <li>逐層嘗試，找到正確踏板時點選格子進行標記。</li>
+          <li>系統會自動產生 10 位踏板路徑，所有隊員即時同步！</li>
+        </ol>
+      </div>
+
+      <footer class="footer">
+        MapleStory Romeo &amp; Juliet PQ Tool · Google Sheet 版
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast-msg"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/index.js"></script>
+</body>
+
+</html>

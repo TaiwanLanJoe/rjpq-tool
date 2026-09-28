@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>楓之谷 · 羅朱跳台協作房間</title>
+  <meta name="description" content="羅朱跳台實時協作房間，多人同步標記踏板路徑。">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body class="room-body">
+  <!-- 若尚未設定 Google Sheet 網址時的提示橫幅 -->
+  <div id="demoNotice" class="demo-banner" style="display: none; width: 100%;">
+    ⚠️ 目前未設定 Google Sheet 網址，已進入【本機模擬演示模式】。<a href="教學與說明.md" target="_blank">點此查看 Google Sheet 設置教學</a>
+  </div>
+
+  <!-- 頂部資訊列 -->
+  <header class="room-header">
+    <div class="header-left">
+      <a href="./" class="back-btn" title="返回首頁">←</a>
+      <div class="room-code-area">
+        <span class="label">房間</span>
+        <span class="code" id="roomCodeDisplay">------</span>
+        <span class="label" style="margin-left: 6px;">密碼</span>
+        <span class="code" id="roomPwdDisplay" style="font-size: 14px;">----</span>
+        <button class="copy-btn" onclick="copyRoomInfo()" title="複製房間連結與資訊">📋</button>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-indicator connected" id="statusIndicator" title="連線狀態">
+        <span class="dot"></span>
+        <span id="statusText">連線中</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 路徑顯示列 (第 1 層到第 10 層) -->
+  <div class="path-bar">
+    <span class="label" style="color: #fff; font-size: 13px;">我的路徑</span>
+    <span class="path-value" id="pathDisplay">????? ?????</span>
+  </div>
+
+  <!-- 角色選擇與重置 -->
+  <div class="controls-bar">
+    <div class="char-buttons" id="charButtons">
+      <div class="char-wrap">
+        <button class="char-btn" data-color="0" onclick="selectCharacter(0)">
+          <span>101</span>
+        </button>
+      </div>
+      <div class="char-wrap">
+        <button class="char-btn" data-color="1" onclick="selectCharacter(1)">
+          <span>102</span>
+        </button>
+      </div>
+      <div class="char-wrap">
+        <button class="char-btn" data-color="2" onclick="selectCharacter(2)">
+          <span>103</span>
+        </button>
+      </div>
+      <div class="char-wrap">
+        <button class="char-btn" data-color="3" onclick="selectCharacter(3)">
+          <span>104</span>
+        </button>
+      </div>
+    </div>
+    <button class="reset-btn" onclick="resetAllPlatforms()">
+      🔄 <span>清空重置</span>
+    </button>
+  </div>
+
+  <!-- 10x4 平台網格 -->
+  <div class="grid-container" id="platforms"></div>
+
+  <!-- Toast 快顯通知 -->
+  <div id="toast" class="toast-msg"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/room.js"></script>
+</body>
+
+</html>
