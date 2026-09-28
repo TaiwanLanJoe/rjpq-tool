@@ -1,12 +1,12 @@
 /**
  * ==========================================================================
- * 楓之谷 羅朱跳台協作工具 (狗男女工具) - Google Apps Script 後端 (獨立分軌版)
+ * 楓之谷 羅朱跳台協作工具 (狗男女工具) - Google Apps Script 後端 (完全兼容新舊版)
  * ==========================================================================
  * 
  * 【特色優化】：
- * 1. 徹底分離 4 位玩家的資料 (P0/101, P1/102, P2/103, P3/104 獨立欄位)，徹底解決多人同時點擊覆蓋、格子消失的問題！
- * 2. 引入 LockService（檔案鎖），避免同時寫入衝突。
- * 3. 引入 CacheService（高速快取），大幅降低 LAG 延遲！
+ * 1. 支援「舊房間無縫相容」：即使使用以前建立的舊房間，系統會自動將舊版 40 格格式平滑遷移為新版 4 軌獨立格式！
+ * 2. 徹底分離 4 位玩家的資料 (P0/101, P1/102, P2/103, P3/104 獨立欄位)，徹底解決多人點擊格子互相覆蓋消失問題！
+ * 3. 引入 LockService（檔案鎖）與 CacheService（高速快取），大幅降低延遲！
  */
 
 const SHEET_ROOMS = "Rooms";
@@ -49,12 +49,12 @@ function doGet(e) {
         p2: Array(10).fill(-1),
         p3: Array(10).fill(-1),
         updatedAt: timestamp
-      }), 21600); // 6 小時
+      }), 21600);
 
       return createJsonResponse({ success: true, code: code, password: pwd });
     }
 
-    // 2. 輪詢同步資料 (優先從快取讀取，極速響應)
+    // 2. 輪詢同步資料 (優先從快取讀取)
     if (action === "sync") {
       const code = (params.code || "").toString().trim();
       const pwd = (params.pwd || "").toString().trim();
@@ -73,26 +73,21 @@ function doGet(e) {
         });
       }
 
-      // 快取未命中，從試算表讀取
+      // 快取未命中，從試算表讀取並自動相容舊版結構
       const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
+      ensureGridSheetHeaders(gridSheet);
       const gridRows = gridSheet.getDataRange().getValues();
 
       for (let i = 1; i < gridRows.length; i++) {
         if (gridRows[i][0].toString() === code) {
-          const p0 = safeJsonParse(gridRows[i][1], Array(10).fill(-1));
-          const p1 = safeJsonParse(gridRows[i][2], Array(10).fill(-1));
-          const p2 = safeJsonParse(gridRows[i][3], Array(10).fill(-1));
-          const p3 = safeJsonParse(gridRows[i][4], Array(10).fill(-1));
-          const updatedAt = gridRows[i][5] || Date.now();
-
-          // 寫回快取
-          cache.put("room_" + code, JSON.stringify({ p0, p1, p2, p3, updatedAt }), 21600);
+          const rowData = parseAndMigrateRow(gridSheet, i + 1, gridRows[i]);
+          cache.put("room_" + code, JSON.stringify(rowData), 21600);
 
           return createJsonResponse({
             success: true,
             code: code,
-            players: [p0, p1, p2, p3],
-            updatedAt: updatedAt
+            players: [rowData.p0, rowData.p1, rowData.p2, rowData.p3],
+            updatedAt: rowData.updatedAt
           });
         }
       }
@@ -100,7 +95,7 @@ function doGet(e) {
       return createJsonResponse({ error: "房間不存在" });
     }
 
-    // 3. GET 模式更新 (若前端使用 GET 回退)
+    // 3. GET 模式更新
     if (action === "updatePlayer") {
       const code = (params.code || "").toString().trim();
       const color = parseInt(params.color);
@@ -121,7 +116,7 @@ function doGet(e) {
 }
 
 /**
- * 處理 POST 請求 (避免 CORS preflight)
+ * 處理 POST 請求
  */
 function doPost(e) {
   try {
@@ -158,57 +153,52 @@ function doPost(e) {
 }
 
 /**
- * 核心：僅更新特定玩家的 10 層路徑 (獨立分軌，互不覆蓋！)
+ * 核心：僅更新特定玩家的 10 層路徑
  */
 function handlePlayerUpdate(ss, code, color, path) {
   if (!code || color < 0 || color > 3 || !Array.isArray(path) || path.length !== 10) {
     return createJsonResponse({ error: "資料格式錯誤" });
   }
 
-  // 取得腳本鎖，避免同微秒並發寫入試算表衝突
   const lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(5000);
-  } catch (e) {
-    // 逾時直接繼續
-  }
+  try { lock.waitLock(5000); } catch (e) {}
 
   try {
     const timestamp = Date.now();
     const cache = CacheService.getScriptCache();
     let currentData = { p0: Array(10).fill(-1), p1: Array(10).fill(-1), p2: Array(10).fill(-1), p3: Array(10).fill(-1) };
 
-    const cached = cache.get("room_" + code);
-    if (cached) {
-      currentData = JSON.parse(cached);
-    }
-
-    // 只修改該角色對應的數據！
-    currentData["p" + color] = path;
-    currentData.updatedAt = timestamp;
-    cache.put("room_" + code, JSON.stringify(currentData), 21600);
-
-    // 同步寫入 Google Sheet
     const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
+    ensureGridSheetHeaders(gridSheet);
     const gridRows = gridSheet.getDataRange().getValues();
-    const colIndex = color + 2; // P0 是第 2 欄 (B), P1 是第 3 欄 (C)...
 
     for (let i = 1; i < gridRows.length; i++) {
       if (gridRows[i][0].toString() === code) {
+        // 先確保舊資料若為 40 格，無痛遷移為 4 軌
+        currentData = parseAndMigrateRow(gridSheet, i + 1, gridRows[i]);
+
+        // 只更新該位玩家的踏板資料
+        currentData["p" + color] = path;
+        currentData.updatedAt = timestamp;
+        cache.put("room_" + code, JSON.stringify(currentData), 21600);
+
+        // 寫入試算表
+        const colIndex = color + 2; // P0 是第 2 欄 (B), P1 是第 3 欄 (C)...
         gridSheet.getRange(i + 1, colIndex).setValue(JSON.stringify(path));
-        gridSheet.getRange(i + 1, 6).setValue(timestamp); // UpdatedAt
+        gridSheet.getRange(i + 1, 6).setValue(timestamp);
+
         return createJsonResponse({ success: true, color: color, updatedAt: timestamp });
       }
     }
 
-    // 若原表沒有，新增一列
-    gridSheet.appendRow([code,
-      color === 0 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
-      color === 1 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
-      color === 2 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
-      color === 3 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
-      timestamp
-    ]);
+    // 若原表未找到該房間列，新建該列
+    const p0 = color === 0 ? path : Array(10).fill(-1);
+    const p1 = color === 1 ? path : Array(10).fill(-1);
+    const p2 = color === 2 ? path : Array(10).fill(-1);
+    const p3 = color === 3 ? path : Array(10).fill(-1);
+
+    gridSheet.appendRow([code, JSON.stringify(p0), JSON.stringify(p1), JSON.stringify(p2), JSON.stringify(p3), timestamp]);
+    cache.put("room_" + code, JSON.stringify({ p0, p1, p2, p3, updatedAt: timestamp }), 21600);
 
     return createJsonResponse({ success: true, color: color, updatedAt: timestamp });
 
@@ -233,6 +223,7 @@ function handleReset(ss, code) {
     cache.put("room_" + code, JSON.stringify({ p0: empty, p1: empty, p2: empty, p3: empty, updatedAt: timestamp }), 21600);
 
     const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
+    ensureGridSheetHeaders(gridSheet);
     const gridRows = gridSheet.getDataRange().getValues();
 
     for (let i = 1; i < gridRows.length; i++) {
@@ -246,6 +237,65 @@ function handleReset(ss, code) {
     return createJsonResponse({ success: true, updatedAt: timestamp });
   } finally {
     try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+/**
+ * 自動相容舊版結構：若讀取到舊版 40 格數據，自動拆解成 4 軌並更新到試算表
+ */
+function parseAndMigrateRow(gridSheet, rowIndex, rowData) {
+  const rawCol1 = safeJsonParse(rowData[1], null);
+
+  // 判斷是否為舊版 40 格格式
+  if (Array.isArray(rawCol1) && rawCol1.length === 40) {
+    const p0 = Array(10).fill(-1);
+    const p1 = Array(10).fill(-1);
+    const p2 = Array(10).fill(-1);
+    const p3 = Array(10).fill(-1);
+
+    for (let row = 0; row < 10; row++) {
+      for (let col = 0; col < 4; col++) {
+        const val = rawCol1[row * 4 + col];
+        if (val === 0) p0[row] = col;
+        else if (val === 1) p1[row] = col;
+        else if (val === 2) p2[row] = col;
+        else if (val === 3) p3[row] = col;
+      }
+    }
+
+    const timestamp = Date.now();
+    // 自動將舊資料轉換成新欄位格式寫回
+    gridSheet.getRange(rowIndex, 2, 1, 4).setValues([[
+      JSON.stringify(p0),
+      JSON.stringify(p1),
+      JSON.stringify(p2),
+      JSON.stringify(p3)
+    ]]);
+    gridSheet.getRange(rowIndex, 6).setValue(timestamp);
+
+    return { p0, p1, p2, p3, updatedAt: timestamp };
+  }
+
+  // 已經是新版獨立欄位格式
+  const p0 = safeJsonParse(rowData[1], Array(10).fill(-1));
+  const p1 = safeJsonParse(rowData[2], Array(10).fill(-1));
+  const p2 = safeJsonParse(rowData[3], Array(10).fill(-1));
+  const p3 = safeJsonParse(rowData[4], Array(10).fill(-1));
+  const updatedAt = rowData[5] || Date.now();
+
+  return { p0, p1, p2, p3, updatedAt };
+}
+
+/**
+ * 確保 GridData 標題包含 6 個標準欄位
+ */
+function ensureGridSheetHeaders(sheet) {
+  const headers = ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"];
+  const currentHeaders = sheet.getRange(1, 1, 1, 6).getValues()[0];
+  if (currentHeaders[1] !== "P0" || currentHeaders[2] !== "P1") {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
   }
 }
 
