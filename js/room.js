@@ -125,18 +125,11 @@ function updateBadges(counts) {
 }
 
 // ===== 點擊踏板格子 =====
-let lastClickTime = 0;
-const CLICK_COOLDOWN = 180;
-
-async function onCellClick(row, col, index) {
+function onCellClick(row, col, index) {
   if (selectedColor === -1) {
     showToast("⚠️ 請先在上方選取您的角色 (101 ～ 104)！");
     return;
   }
-
-  const now = Date.now();
-  if (now - lastClickTime < CLICK_COOLDOWN) return;
-  lastClickTime = now;
 
   const currentMarkedCol = players[selectedColor][row];
 
@@ -155,29 +148,63 @@ async function onCellClick(row, col, index) {
     players[selectedColor][row] = col;
   }
 
-  // 樂觀更新畫面
+  // 本機立即 0 延遲更新畫面（點再快都即時變色）
   syncGridFromPlayers();
   updateCells();
 
-  // 僅上傳自己這條路徑！完全不接觸隊友的資料
-  saveMyPlayerPath();
+  // 觸發防抖佇列上傳（多次快速連點會合併為 1 次最新狀態上傳，防止網路亂序與重複請求）
+  scheduleSaveMyPath();
 }
 
-// ===== 儲存自己角色的路徑至後端 =====
-async function saveMyPlayerPath() {
-  if (selectedColor === -1) return;
-  isSaving = true;
+// ===== 防抖與佇列上傳機制 (解決快速點擊覆蓋/消失的核心) =====
+let saveDebounceTimer = null;
+let isUploading = false;
+let hasPendingSave = false;
+
+function scheduleSaveMyPath() {
+  hasPendingSave = true;
   updateStatus("syncing", "同步中");
 
+  // 清除前一次防抖計時器
+  if (saveDebounceTimer) {
+    clearTimeout(saveDebounceTimer);
+  }
+
+  // 400ms 防抖：連續快速點擊時等待停頓，一口氣打包最新結果上傳至 Google Sheet
+  saveDebounceTimer = setTimeout(() => {
+    saveDebounceTimer = null;
+    executeSaveMyPath();
+  }, 400);
+}
+
+async function executeSaveMyPath() {
+  if (isUploading) {
+    // 若當前有請求正在傳輸中，標記 pending 等它完成後立即發送最新版
+    hasPendingSave = true;
+    return;
+  }
+
+  if (!hasPendingSave || selectedColor === -1) return;
+
+  isUploading = true;
+  hasPendingSave = false;
+  isSaving = true; // 告知背景輪詢切勿覆蓋本地狀態
+
   try {
-    const myPath = players[selectedColor];
-    await Api.updatePlayer(roomCode, roomPwd, selectedColor, myPath);
+    const myPathSnapshot = [...players[selectedColor]];
+    await Api.updatePlayer(roomCode, roomPwd, selectedColor, myPathSnapshot);
     updateStatus("connected", "已同步");
   } catch (err) {
     console.error("儲存失敗:", err);
     updateStatus("disconnected", "同步失敗");
+    hasPendingSave = true;
   } finally {
+    isUploading = false;
     isSaving = false;
+    // 如果剛才上傳期間又有新的點擊，立刻觸發下一輪最新上傳
+    if (hasPendingSave) {
+      scheduleSaveMyPath();
+    }
   }
 }
 
@@ -293,8 +320,8 @@ async function fetchSync() {
     if (res.success && Array.isArray(res.players)) {
       // 合併 4 位玩家資料
       for (let c = 0; c < 4; c++) {
-        // 【核心防消失關鍵】：如果自己正在點擊保存，不讓舊的伺服器資料覆寫自己！
-        if (c === selectedColor && isSaving) {
+        // 【核心防消失關鍵】：如果自己正在點擊、等待防抖、或正在上傳中，絕對不讓舊的伺服器資料覆寫自己！
+        if (c === selectedColor && (isSaving || isUploading || hasPendingSave || saveDebounceTimer)) {
           continue;
         }
         if (Array.isArray(res.players[c])) {
@@ -320,6 +347,12 @@ function startPolling() {
 // ===== 重置所有踏板 =====
 async function resetAllPlatforms() {
   if (!confirm("確定要清空全隊所有的跳台標記嗎？")) return;
+
+  if (saveDebounceTimer) {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = null;
+  }
+  hasPendingSave = false;
 
   players = [
     Array(10).fill(-1),
