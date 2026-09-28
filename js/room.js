@@ -13,6 +13,13 @@ if (!roomCode || !/^\d{6}$/.test(roomCode) || !roomPwd) {
   window.location.href = back;
 }
 
+// 客戶端唯一 ID (用於統計在線人數與心跳)
+let myClientId = sessionStorage.getItem("rjpq_client_id");
+if (!myClientId) {
+  myClientId = "c_" + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+  sessionStorage.setItem("rjpq_client_id", myClientId);
+}
+
 // 4 位玩家的獨立 10 層踩踏資料 (0: 101紅, 1: 102綠, 2: 103藍, 3: 104紫)
 // 陣列值為 0~3 (代表踏板 1~4) 或 -1 (未踩)
 let players = [
@@ -25,6 +32,7 @@ let players = [
 let roomData = Array(40).fill(CONFIG.EMPTY_COLOR);
 let prevData = Array(40).fill(-1);
 let selectedColor = -1; // 當前選取的角色編號 (0~3)
+let lastCharCounts = [0, 0, 0, 0];
 let isSaving = false;
 let pollTimer = null;
 const cells = [];
@@ -94,6 +102,26 @@ function selectCharacter(colorIndex) {
 
   renderPath();
   updateCellsDimmedState();
+  if (lastCharCounts) updateBadges(lastCharCounts);
+  fetchSync(); // 切換角色時立即送出心跳通知
+}
+
+// ===== 更新角色按鈕上方在線標籤 (me 或 人數) =====
+function updateBadges(counts) {
+  for (let i = 0; i < 4; i++) {
+    const badge = document.getElementById("badge" + i);
+    if (!badge) continue;
+    const count = counts[i] || 0;
+    if (count === 0) {
+      badge.style.visibility = "hidden";
+    } else if (count === 1 && selectedColor === i) {
+      badge.textContent = "me";
+      badge.style.visibility = "visible";
+    } else {
+      badge.textContent = count;
+      badge.style.visibility = "visible";
+    }
+  }
 }
 
 // ===== 點擊踏板格子 =====
@@ -238,7 +266,7 @@ function renderPath() {
 // ===== 輪詢同步資料 =====
 async function fetchSync() {
   try {
-    const res = await Api.syncRoom(roomCode, roomPwd);
+    const res = await Api.syncRoom(roomCode, roomPwd, myClientId, selectedColor);
 
     if (res.error) {
       if (res.error === "密碼錯誤" || res.error === "房間不存在") {
@@ -248,6 +276,18 @@ async function fetchSync() {
       }
       updateStatus("disconnected", "連線異常");
       return;
+    }
+
+    // 更新在線人數
+    if (typeof res.count === "number") {
+      const countEl = document.getElementById("countNum");
+      if (countEl) countEl.textContent = res.count;
+    }
+
+    // 更新角色頭像上的徽章 (me / 人數)
+    if (Array.isArray(res.charCounts)) {
+      lastCharCounts = res.charCounts;
+      updateBadges(res.charCounts);
     }
 
     if (res.success && Array.isArray(res.players)) {

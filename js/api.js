@@ -35,11 +35,13 @@ const Api = {
   },
 
   /**
-   * 同步房間狀態 (取得 4 位玩家的獨立數據)
+   * 同步房間狀態 (取得 4 位玩家的獨立數據與在線心跳)
    */
-  async syncRoom(code, pwd) {
+  async syncRoom(code, pwd, clientId = "", color = -1) {
     if (!this.isConfigured()) {
       const saved = localStorage.getItem(`rjpq_demo_${code}`);
+      const charCounts = [0, 0, 0, 0];
+      if (color >= 0 && color <= 3) charCounts[color] = 1;
       if (!saved) {
         const init = {
           pwd: pwd || "1234",
@@ -47,15 +49,15 @@ const Api = {
           updatedAt: Date.now()
         };
         localStorage.setItem(`rjpq_demo_${code}`, JSON.stringify(init));
-        return { success: true, code, players: init.players, updatedAt: init.updatedAt, isDemo: true };
+        return { success: true, code, players: init.players, updatedAt: init.updatedAt, count: 1, charCounts, isDemo: true };
       }
       const parsed = JSON.parse(saved);
       if (pwd && parsed.pwd !== pwd) return { error: "密碼錯誤" };
-      return { success: true, code, players: parsed.players, updatedAt: parsed.updatedAt, isDemo: true };
+      return { success: true, code, players: parsed.players, updatedAt: parsed.updatedAt, count: 1, charCounts, isDemo: true };
     }
 
     try {
-      const url = `${CONFIG.GAS_API_URL}?action=sync&code=${encodeURIComponent(code)}&pwd=${encodeURIComponent(pwd || "")}`;
+      const url = `${CONFIG.GAS_API_URL}?action=sync&code=${encodeURIComponent(code)}&pwd=${encodeURIComponent(pwd || "")}&clientId=${encodeURIComponent(clientId)}&color=${encodeURIComponent(color)}`;
       const res = await fetch(url, { method: "GET" });
       return await res.json();
     } catch (err) {

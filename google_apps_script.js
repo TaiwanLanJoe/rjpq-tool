@@ -54,14 +54,18 @@ function doGet(e) {
       return createJsonResponse({ success: true, code: code, password: pwd });
     }
 
-    // 2. 輪詢同步資料 (優先從快取讀取)
+    // 2. 輪詢同步資料 (優先從快取讀取，並計算在線心跳人數)
     if (action === "sync") {
       const code = (params.code || "").toString().trim();
       const pwd = (params.pwd || "").toString().trim();
+      const clientId = (params.clientId || "").toString().trim();
+      const color = params.color !== undefined ? parseInt(params.color) : -1;
 
       if (!code) return createJsonResponse({ error: "缺少房間代碼" });
 
       const cache = CacheService.getScriptCache();
+      const presenceInfo = computePresence(cache, code, clientId, color);
+
       const cached = cache.get("room_" + code);
       if (cached) {
         const parsed = JSON.parse(cached);
@@ -69,7 +73,9 @@ function doGet(e) {
           success: true,
           code: code,
           players: [parsed.p0, parsed.p1, parsed.p2, parsed.p3],
-          updatedAt: parsed.updatedAt
+          updatedAt: parsed.updatedAt,
+          count: presenceInfo.count,
+          charCounts: presenceInfo.charCounts
         });
       }
 
@@ -87,7 +93,9 @@ function doGet(e) {
             success: true,
             code: code,
             players: [rowData.p0, rowData.p1, rowData.p2, rowData.p3],
-            updatedAt: rowData.updatedAt
+            updatedAt: rowData.updatedAt,
+            count: presenceInfo.count,
+            charCounts: presenceInfo.charCounts
           });
         }
       }
@@ -321,4 +329,41 @@ function getOrCreateSheet(ss, sheetName, headers) {
 function createJsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * 計算房間在線人數與各角色被選次數 (基於 6 秒心跳快取)
+ */
+function computePresence(cache, code, clientId, color) {
+  const presenceKey = "pres_" + code;
+  let presence = {};
+  const cached = cache.get(presenceKey);
+  if (cached) {
+    try { presence = JSON.parse(cached); } catch (e) {}
+  }
+
+  const now = Date.now();
+  if (clientId) {
+    presence[clientId] = { t: now, c: parseInt(color) };
+  }
+
+  let count = 0;
+  const charCounts = [0, 0, 0, 0];
+  const active = {};
+
+  for (const id in presence) {
+    const item = presence[id];
+    // 6 秒內有心跳則判定在線
+    if (now - item.t <= 6000) {
+      active[id] = item;
+      count++;
+      if (item.c >= 0 && item.c <= 3) {
+        charCounts[item.c]++;
+      }
+    }
+  }
+
+  // 存回快取，存活 60 秒
+  cache.put(presenceKey, JSON.stringify(active), 60);
+  return { count: Math.max(count, 1), charCounts: charCounts };
 }

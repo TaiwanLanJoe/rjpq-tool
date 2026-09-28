@@ -31,6 +31,9 @@
       </div>
     </div>
     <div class="header-right">
+      <div class="room-count" id="roomCount" title="房間內在線人數">
+        <span>👤</span> <span id="countNum">1</span>
+      </div>
       <div class="status-indicator connected" id="statusIndicator" title="連線狀態">
         <span class="dot"></span>
         <span id="statusText">連線中</span>
@@ -51,21 +54,25 @@
         <button class="char-btn" data-color="0" onclick="selectCharacter(0)">
           <span>101</span>
         </button>
+        <span class="char-badge" id="badge0"></span>
       </div>
       <div class="char-wrap">
         <button class="char-btn" data-color="1" onclick="selectCharacter(1)">
           <span>102</span>
         </button>
+        <span class="char-badge" id="badge1"></span>
       </div>
       <div class="char-wrap">
         <button class="char-btn" data-color="2" onclick="selectCharacter(2)">
           <span>103</span>
         </button>
+        <span class="char-badge" id="badge2"></span>
       </div>
       <div class="char-wrap">
         <button class="char-btn" data-color="3" onclick="selectCharacter(3)">
           <span>104</span>
         </button>
+        <span class="char-badge" id="badge3"></span>
       </div>
     </div>
     <button class="reset-btn" onclick="resetAllPlatforms()">
