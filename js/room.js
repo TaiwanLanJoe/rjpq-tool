@@ -1,5 +1,5 @@
 /**
- * 楓之谷 羅朱跳台協作工具 - 房間頁面邏輯
+ * 楓之谷 羅朱跳台協作工具 - 房間頁面邏輯 (獨立分軌防覆蓋版)
  */
 
 // ===== 狀態變數 =====
@@ -13,36 +13,40 @@ if (!roomCode || !/^\d{6}$/.test(roomCode) || !roomPwd) {
   window.location.href = back;
 }
 
+// 4 位玩家的獨立 10 層踩踏資料 (0: 101紅, 1: 102綠, 2: 103藍, 3: 104紫)
+// 陣列值為 0~3 (代表踏板 1~4) 或 -1 (未踩)
+let players = [
+  Array(10).fill(-1),
+  Array(10).fill(-1),
+  Array(10).fill(-1),
+  Array(10).fill(-1)
+];
+
 let roomData = Array(40).fill(CONFIG.EMPTY_COLOR);
 let prevData = Array(40).fill(-1);
-let selectedColor = -1; // 預設未選擇
-let lastUpdatedAt = 0;
+let selectedColor = -1; // 當前選取的角色編號 (0~3)
 let isSaving = false;
 let pollTimer = null;
 const cells = [];
 
 // ===== 初始化 =====
 document.addEventListener("DOMContentLoaded", () => {
-  // 顯示房號與密碼
   document.getElementById("roomCodeDisplay").textContent = roomCode;
   document.getElementById("roomPwdDisplay").textContent = roomPwd || "---";
 
-  // 若未設定 Google Sheet 網址，顯示警告橫幅
   if (!Api.isConfigured()) {
     const banner = document.getElementById("demoNotice");
     if (banner) banner.style.display = "block";
   }
 
-  // 初始化 10x4 格子
   initGrid();
 
-  // 還原上次選擇的角色 (記憶功能)
+  // 還原上次選擇的角色
   const savedChar = localStorage.getItem("rjpq_last_char");
   if (savedChar !== null && [0, 1, 2, 3].includes(parseInt(savedChar))) {
     selectCharacter(parseInt(savedChar));
   }
 
-  // 初次同步資料並啟動輪詢
   fetchSync();
   startPolling();
 });
@@ -52,12 +56,11 @@ function initGrid() {
   const container = document.getElementById("platforms");
   container.innerHTML = "";
 
-  // 10 層，介面上第 10 層在最上面，第 1 層在最下面
   for (let row = 0; row < 10; row++) {
     const rowDiv = document.createElement("div");
     rowDiv.className = "platform-row";
 
-    // 層數標記 (10 ~ 1)
+    // 層數 (10 ~ 1)
     const rowNum = document.createElement("div");
     rowNum.className = "row-num";
     rowNum.textContent = 10 - row;
@@ -71,7 +74,7 @@ function initGrid() {
       cell.textContent = col + 1;
       cell.dataset.index = index;
 
-      cell.addEventListener("click", () => onCellClick(index));
+      cell.addEventListener("click", () => onCellClick(row, col, index));
       rowDiv.appendChild(cell);
       cells[index] = cell;
     }
@@ -85,21 +88,19 @@ function selectCharacter(colorIndex) {
   selectedColor = colorIndex;
   localStorage.setItem("rjpq_last_char", colorIndex);
 
-  // 切換按鈕 active 樣式
   document.querySelectorAll(".char-btn").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.color) === colorIndex);
   });
 
-  // 重新計算路徑與格子透明度
   renderPath();
   updateCellsDimmedState();
 }
 
 // ===== 點擊踏板格子 =====
 let lastClickTime = 0;
-const CLICK_COOLDOWN = 200;
+const CLICK_COOLDOWN = 180;
 
-async function onCellClick(index) {
+async function onCellClick(row, col, index) {
   if (selectedColor === -1) {
     showToast("⚠️ 請先在上方選取您的角色 (101 ～ 104)！");
     return;
@@ -109,48 +110,62 @@ async function onCellClick(index) {
   if (now - lastClickTime < CLICK_COOLDOWN) return;
   lastClickTime = now;
 
-  // 1. 若點擊的是自己已標記的踏板 -> 取消標記
-  if (roomData[index] === selectedColor) {
-    roomData[index] = CONFIG.EMPTY_COLOR;
-    updateCells();
-    saveData();
-    return;
-  }
+  const currentMarkedCol = players[selectedColor][row];
 
-  // 2. 若該踏板已被其他隊友佔用 -> 不可覆蓋
-  if (roomData[index] !== CONFIG.EMPTY_COLOR) {
-    showToast("⚠️ 此踏板已被其他隊友標記！");
-    return;
-  }
-
-  // 3. 樂觀更新：同層內同顏色互斥（一個人在一層只有一個正確踩點）
-  const rowStart = Math.floor(index / 4) * 4;
-  for (let i = rowStart; i < rowStart + 4; i++) {
-    if (i !== index && roomData[i] === selectedColor) {
-      roomData[i] = CONFIG.EMPTY_COLOR;
+  // 1. 若點擊的是自己已踩的踏板 -> 取消標記
+  if (currentMarkedCol === col) {
+    players[selectedColor][row] = -1;
+  } else {
+    // 2. 檢查此踏板是否被「其他隊友」佔用
+    for (let c = 0; c < 4; c++) {
+      if (c !== selectedColor && players[c][row] === col) {
+        showToast("⚠️ 此踏板已被其他隊友標記！");
+        return;
+      }
     }
+    // 3. 標記為自己的踏板 (同層自動互斥換位)
+    players[selectedColor][row] = col;
   }
 
-  roomData[index] = selectedColor;
+  // 樂觀更新畫面
+  syncGridFromPlayers();
   updateCells();
-  saveData();
+
+  // 僅上傳自己這條路徑！完全不接觸隊友的資料
+  saveMyPlayerPath();
 }
 
-// ===== 儲存資料至後端 (Google Sheet) =====
-async function saveData() {
+// ===== 儲存自己角色的路徑至後端 =====
+async function saveMyPlayerPath() {
+  if (selectedColor === -1) return;
   isSaving = true;
   updateStatus("syncing", "同步中");
+
   try {
-    const res = await Api.updateGrid(roomCode, roomPwd, roomData);
-    if (res && res.updatedAt) {
-      lastUpdatedAt = res.updatedAt;
-    }
+    const myPath = players[selectedColor];
+    await Api.updatePlayer(roomCode, roomPwd, selectedColor, myPath);
     updateStatus("connected", "已同步");
   } catch (err) {
     console.error("儲存失敗:", err);
     updateStatus("disconnected", "同步失敗");
   } finally {
     isSaving = false;
+  }
+}
+
+// ===== 將 4 位玩家的獨立路徑合成 40 格矩陣 =====
+function syncGridFromPlayers() {
+  roomData = Array(40).fill(CONFIG.EMPTY_COLOR);
+  for (let c = 0; c < 4; c++) {
+    const path = players[c];
+    if (Array.isArray(path)) {
+      for (let row = 0; row < 10; row++) {
+        const col = path[row];
+        if (col >= 0 && col < 4) {
+          roomData[row * 4 + col] = c;
+        }
+      }
+    }
   }
 }
 
@@ -182,7 +197,7 @@ function updateCells() {
   renderPath();
 }
 
-// ===== 更新其他角色的半透明狀態 =====
+// ===== 更新半透明狀態 =====
 function updateCellsDimmedState() {
   for (let i = 0; i < 40; i++) {
     const cell = cells[i];
@@ -205,27 +220,23 @@ function renderPath() {
     return;
   }
 
-  // 10 層預設為 '?'
-  const path = new Array(10).fill("?");
-  for (let i = 0; i < 40; i++) {
-    if (roomData[i] === selectedColor) {
-      const rowIndex = Math.floor(i / 4); // 0 (10層) 到 9 (1層)
-      const colNum = (i % 4) + 1; // 踏板 1 ~ 4
-      path[rowIndex] = colNum;
+  const myPath = players[selectedColor]; // 10 層 (row 0 是 10 層，row 9 是 1 層)
+  const displayArr = new Array(10).fill("?");
+
+  for (let row = 0; row < 10; row++) {
+    if (myPath[row] >= 0) {
+      displayArr[row] = (myPath[row] + 1); // 踏板 1~4
     }
   }
 
-  // 反轉陣列，使第 1 層在最前面、第 10 層在最後面
-  const fromLevel1To10 = path.slice().reverse();
-  // 格式化為 5-5 分組，例如：14231 23412
-  const formatted = fromLevel1To10.slice(0, 5).join("") + " " + fromLevel1To10.slice(5).join("");
+  // 反轉：使第 1 層在左，第 10 層在右
+  const reversed = displayArr.slice().reverse();
+  const formatted = reversed.slice(0, 5).join("") + " " + reversed.slice(5).join("");
   pathDisplay.textContent = formatted;
 }
 
 // ===== 輪詢同步資料 =====
 async function fetchSync() {
-  if (isSaving) return; // 若正在送出更新，先不覆寫
-
   try {
     const res = await Api.syncRoom(roomCode, roomPwd);
 
@@ -239,13 +250,20 @@ async function fetchSync() {
       return;
     }
 
-    if (res.success && Array.isArray(res.data)) {
-      // 若遠端資料的時間戳較新，則更新本地
-      if (!res.updatedAt || res.updatedAt > lastUpdatedAt) {
-        roomData = res.data;
-        if (res.updatedAt) lastUpdatedAt = res.updatedAt;
-        updateCells();
+    if (res.success && Array.isArray(res.players)) {
+      // 合併 4 位玩家資料
+      for (let c = 0; c < 4; c++) {
+        // 【核心防消失關鍵】：如果自己正在點擊保存，不讓舊的伺服器資料覆寫自己！
+        if (c === selectedColor && isSaving) {
+          continue;
+        }
+        if (Array.isArray(res.players[c])) {
+          players[c] = res.players[c];
+        }
       }
+
+      syncGridFromPlayers();
+      updateCells();
       updateStatus("connected", "已同步");
     }
   } catch (err) {
@@ -259,11 +277,17 @@ function startPolling() {
   pollTimer = setInterval(fetchSync, CONFIG.POLL_INTERVAL || 1500);
 }
 
-// ===== 重置所有跳台 =====
+// ===== 重置所有踏板 =====
 async function resetAllPlatforms() {
   if (!confirm("確定要清空全隊所有的跳台標記嗎？")) return;
 
-  roomData = Array(40).fill(CONFIG.EMPTY_COLOR);
+  players = [
+    Array(10).fill(-1),
+    Array(10).fill(-1),
+    Array(10).fill(-1),
+    Array(10).fill(-1)
+  ];
+  syncGridFromPlayers();
   updateCells();
   updateStatus("syncing", "重置中");
 
@@ -332,5 +356,5 @@ function showToast(msg) {
   toast.classList.add("show");
   setTimeout(() => {
     toast.classList.remove("show");
-  }, 2200);
+  }, 2000);
 }

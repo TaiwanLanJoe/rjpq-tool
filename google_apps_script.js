@@ -1,37 +1,19 @@
 /**
  * ==========================================================================
- * 楓之谷 羅朱跳台協作工具 (狗男女工具) - Google Apps Script 後端
+ * 楓之谷 羅朱跳台協作工具 (狗男女工具) - Google Apps Script 後端 (獨立分軌版)
  * ==========================================================================
  * 
- * 【使用步驟】：
- * 1. 在 Google 雲端硬碟建立一個新的「Google 試算表」。
- * 2. 點選試算表頂部選單「擴充功能」 -> 「Apps Script」。
- * 3. 刪除原有所有程式碼，將本檔案內容全部複製貼上進去。
- * 4. 點選右上角藍色「部署」按鈕 -> 選擇「新增部署作業」。
- * 5. 點選齒輪圖示 ⚙️，選擇類型為「網頁應用程式 (Web App)」：
- *    - 說明：跳台工具API
- *    - 執行身分：我 (您的 Google 帳號)
- *    - 誰可以存取：任何人 (Anyone)  <--- 【非常重要！否則前端無法免登入讀寫】
- * 6. 點選「部署」，並授予必要的權限（若跳出未經驗證警告，點選進階 -> 前往專案）。
- * 7. 複製產生的「網頁應用程式網址 (Web App URL)」，貼到前端的 `js/config.js` 中的 `GAS_API_URL`。
+ * 【特色優化】：
+ * 1. 徹底分離 4 位玩家的資料 (P0/101, P1/102, P2/103, P3/104 獨立欄位)，徹底解決多人同時點擊覆蓋、格子消失的問題！
+ * 2. 引入 LockService（檔案鎖），避免同時寫入衝突。
+ * 3. 引入 CacheService（高速快取），大幅降低 LAG 延遲！
  */
 
 const SHEET_ROOMS = "Rooms";
 const SHEET_GRID = "GridData";
 
-// 初始化試算表標題與結構
-function initSpreadsheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  getOrCreateSheet(ss, SHEET_ROOMS, ["RoomCode", "Password", "CreatedAt", "LastActive"]);
-  getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "GridState", "UpdatedAt"]);
-}
-
 /**
  * 處理 GET 請求
- * 支援操作：
- * - action=create&pwd=XXXX            建立房間
- * - action=sync&code=XXXXXX&pwd=XXXX  取得最新跳台資料
- * - action=ping                       測試連線
  */
 function doGet(e) {
   try {
@@ -41,99 +23,105 @@ function doGet(e) {
 
     // 0. 連線測試
     if (action === "ping") {
-      return createJsonResponse({ status: "ok", message: "Google Sheet API 連線正常！", timestamp: Date.now() });
+      return createJsonResponse({ status: "ok", timestamp: Date.now() });
     }
 
     // 1. 建立房間
     if (action === "create") {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       const pwd = params.pwd ? params.pwd.toString().trim() : Math.floor(1000 + Math.random() * 9000).toString();
-      const now = new Date();
-      const nowIso = Utilities.formatDate(now, "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
+      const nowIso = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
 
       const roomSheet = getOrCreateSheet(ss, SHEET_ROOMS, ["RoomCode", "Password", "CreatedAt", "LastActive"]);
       roomSheet.appendRow([code, pwd, nowIso, nowIso]);
 
-      // 初始化 40 格，4 代表空白 (0: 101紅, 1: 102綠, 2: 103藍, 3: 104紫, 4: 空白)
-      const initialGrid = Array(40).fill(4);
-      const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "GridState", "UpdatedAt"]);
-      gridSheet.appendRow([code, JSON.stringify(initialGrid), Date.now()]);
+      // 初始化 4 位玩家的獨立 10 層數據（-1 代表未踩）
+      const emptyPath = JSON.stringify(Array(10).fill(-1));
+      const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
+      const timestamp = Date.now();
+      gridSheet.appendRow([code, emptyPath, emptyPath, emptyPath, emptyPath, timestamp]);
 
-      return createJsonResponse({
-        success: true,
-        code: code,
-        password: pwd
-      });
+      // 寫入快取
+      const cache = CacheService.getScriptCache();
+      cache.put("room_" + code, JSON.stringify({
+        p0: Array(10).fill(-1),
+        p1: Array(10).fill(-1),
+        p2: Array(10).fill(-1),
+        p3: Array(10).fill(-1),
+        updatedAt: timestamp
+      }), 21600); // 6 小時
+
+      return createJsonResponse({ success: true, code: code, password: pwd });
     }
 
-    // 2. 輪詢同步資料
+    // 2. 輪詢同步資料 (優先從快取讀取，極速響應)
     if (action === "sync") {
       const code = (params.code || "").toString().trim();
       const pwd = (params.pwd || "").toString().trim();
 
-      if (!code) {
-        return createJsonResponse({ error: "缺少房間代碼" });
+      if (!code) return createJsonResponse({ error: "缺少房間代碼" });
+
+      const cache = CacheService.getScriptCache();
+      const cached = cache.get("room_" + code);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        return createJsonResponse({
+          success: true,
+          code: code,
+          players: [parsed.p0, parsed.p1, parsed.p2, parsed.p3],
+          updatedAt: parsed.updatedAt
+        });
       }
 
-      // 驗證房間與密碼
-      const roomSheet = getOrCreateSheet(ss, SHEET_ROOMS, ["RoomCode", "Password", "CreatedAt", "LastActive"]);
-      const roomData = roomSheet.getDataRange().getValues();
-      let roomFound = false;
-
-      for (let i = 1; i < roomData.length; i++) {
-        if (roomData[i][0].toString() === code) {
-          if (pwd && roomData[i][1].toString() !== pwd) {
-            return createJsonResponse({ error: "密碼錯誤" });
-          }
-          roomFound = true;
-          break;
-        }
-      }
-
-      if (!roomFound) {
-        return createJsonResponse({ error: "房間不存在" });
-      }
-
-      // 讀取格子資料
-      const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "GridState", "UpdatedAt"]);
+      // 快取未命中，從試算表讀取
+      const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
       const gridRows = gridSheet.getDataRange().getValues();
 
       for (let i = 1; i < gridRows.length; i++) {
         if (gridRows[i][0].toString() === code) {
-          let gridArray;
-          try {
-            gridArray = JSON.parse(gridRows[i][1]);
-          } catch (parseErr) {
-            gridArray = Array(40).fill(4);
-          }
+          const p0 = safeJsonParse(gridRows[i][1], Array(10).fill(-1));
+          const p1 = safeJsonParse(gridRows[i][2], Array(10).fill(-1));
+          const p2 = safeJsonParse(gridRows[i][3], Array(10).fill(-1));
+          const p3 = safeJsonParse(gridRows[i][4], Array(10).fill(-1));
+          const updatedAt = gridRows[i][5] || Date.now();
+
+          // 寫回快取
+          cache.put("room_" + code, JSON.stringify({ p0, p1, p2, p3, updatedAt }), 21600);
+
           return createJsonResponse({
             success: true,
             code: code,
-            data: gridArray,
-            updatedAt: gridRows[i][2] || 0
+            players: [p0, p1, p2, p3],
+            updatedAt: updatedAt
           });
         }
       }
 
-      return createJsonResponse({ error: "尚未找到跳台數據" });
+      return createJsonResponse({ error: "房間不存在" });
     }
 
-    // 3. 也支援透過 GET 提交更新（避免部分瀏覽器或環境的 POST CORS 限制）
-    if (action === "update" || action === "reset") {
+    // 3. GET 模式更新 (若前端使用 GET 回退)
+    if (action === "updatePlayer") {
       const code = (params.code || "").toString().trim();
-      const newGrid = action === "reset" ? Array(40).fill(4) : JSON.parse(params.data || "[]");
-      return handleGridUpdate(ss, code, newGrid);
+      const color = parseInt(params.color);
+      const path = safeJsonParse(params.path, []);
+      return handlePlayerUpdate(ss, code, color, path);
     }
 
-    return createJsonResponse({ error: "未知的 action 請求" });
+    if (action === "reset") {
+      const code = (params.code || "").toString().trim();
+      return handleReset(ss, code);
+    }
+
+    return createJsonResponse({ error: "未知的 action" });
 
   } catch (err) {
-    return createJsonResponse({ error: "伺服器內部錯誤: " + err.toString() });
+    return createJsonResponse({ error: "伺服器錯誤: " + err.toString() });
   }
 }
 
 /**
- * 處理 POST 請求 (更新跳台或重置)
+ * 處理 POST 請求 (避免 CORS preflight)
  */
 function doPost(e) {
   try {
@@ -152,80 +140,123 @@ function doPost(e) {
     const code = (body.code || "").toString().trim();
     const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-    if (action === "reset") {
-      const emptyGrid = Array(40).fill(4);
-      return handleGridUpdate(ss, code, emptyGrid);
+    if (action === "updatePlayer") {
+      const color = parseInt(body.color);
+      const path = Array.isArray(body.path) ? body.path : safeJsonParse(body.path, []);
+      return handlePlayerUpdate(ss, code, color, path);
     }
 
-    if (action === "updateGrid") {
-      const gridData = Array.isArray(body.data) ? body.data : JSON.parse(body.data || "[]");
-      return handleGridUpdate(ss, code, gridData);
+    if (action === "reset") {
+      return handleReset(ss, code);
     }
 
     return createJsonResponse({ error: "未知的 POST action" });
 
   } catch (err) {
-    return createJsonResponse({ error: "POST 處理失敗: " + err.toString() });
+    return createJsonResponse({ error: "POST 失敗: " + err.toString() });
   }
 }
 
 /**
- * 更新指定房間的 40 格狀態
+ * 核心：僅更新特定玩家的 10 層路徑 (獨立分軌，互不覆蓋！)
  */
-function handleGridUpdate(ss, code, gridArray) {
-  if (!code || !Array.isArray(gridArray) || gridArray.length !== 40) {
-    return createJsonResponse({ error: "傳入的格子資料格式不正確" });
+function handlePlayerUpdate(ss, code, color, path) {
+  if (!code || color < 0 || color > 3 || !Array.isArray(path) || path.length !== 10) {
+    return createJsonResponse({ error: "資料格式錯誤" });
   }
 
-  const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "GridState", "UpdatedAt"]);
-  const gridRows = gridSheet.getDataRange().getValues();
-  const timestamp = Date.now();
-
-  for (let i = 1; i < gridRows.length; i++) {
-    if (gridRows[i][0].toString() === code) {
-      // 找到房間列，更新 GridState (欄 2) 與 UpdatedAt (欄 3)
-      gridSheet.getRange(i + 1, 2).setValue(JSON.stringify(gridArray));
-      gridSheet.getRange(i + 1, 3).setValue(timestamp);
-
-      // 同時更新 Rooms 工作表的最後活動時間
-      updateRoomLastActive(ss, code);
-
-      return createJsonResponse({
-        success: true,
-        code: code,
-        updatedAt: timestamp
-      });
-    }
-  }
-
-  // 若沒找到，追加新的一列
-  gridSheet.appendRow([code, JSON.stringify(gridArray), timestamp]);
-  return createJsonResponse({ success: true, code: code, updatedAt: timestamp });
-}
-
-/**
- * 更新房間最後活躍時間
- */
-function updateRoomLastActive(ss, code) {
+  // 取得腳本鎖，避免同微秒並發寫入試算表衝突
+  const lock = LockService.getScriptLock();
   try {
-    const roomSheet = ss.getSheetByName(SHEET_ROOMS);
-    if (!roomSheet) return;
-    const roomRows = roomSheet.getDataRange().getValues();
-    const nowIso = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
-    for (let i = 1; i < roomRows.length; i++) {
-      if (roomRows[i][0].toString() === code) {
-        roomSheet.getRange(i + 1, 4).setValue(nowIso);
-        break;
+    lock.waitLock(5000);
+  } catch (e) {
+    // 逾時直接繼續
+  }
+
+  try {
+    const timestamp = Date.now();
+    const cache = CacheService.getScriptCache();
+    let currentData = { p0: Array(10).fill(-1), p1: Array(10).fill(-1), p2: Array(10).fill(-1), p3: Array(10).fill(-1) };
+
+    const cached = cache.get("room_" + code);
+    if (cached) {
+      currentData = JSON.parse(cached);
+    }
+
+    // 只修改該角色對應的數據！
+    currentData["p" + color] = path;
+    currentData.updatedAt = timestamp;
+    cache.put("room_" + code, JSON.stringify(currentData), 21600);
+
+    // 同步寫入 Google Sheet
+    const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
+    const gridRows = gridSheet.getDataRange().getValues();
+    const colIndex = color + 2; // P0 是第 2 欄 (B), P1 是第 3 欄 (C)...
+
+    for (let i = 1; i < gridRows.length; i++) {
+      if (gridRows[i][0].toString() === code) {
+        gridSheet.getRange(i + 1, colIndex).setValue(JSON.stringify(path));
+        gridSheet.getRange(i + 1, 6).setValue(timestamp); // UpdatedAt
+        return createJsonResponse({ success: true, color: color, updatedAt: timestamp });
       }
     }
-  } catch (e) {
-    // 忽略時間更新的非關鍵錯誤
+
+    // 若原表沒有，新增一列
+    gridSheet.appendRow([code,
+      color === 0 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
+      color === 1 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
+      color === 2 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
+      color === 3 ? JSON.stringify(path) : JSON.stringify(Array(10).fill(-1)),
+      timestamp
+    ]);
+
+    return createJsonResponse({ success: true, color: color, updatedAt: timestamp });
+
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
   }
 }
 
 /**
- * 取得或自動建立工作表
+ * 重置指定房間的所有玩家數據
  */
+function handleReset(ss, code) {
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (e) {}
+
+  try {
+    const timestamp = Date.now();
+    const empty = Array(10).fill(-1);
+    const emptyJson = JSON.stringify(empty);
+
+    const cache = CacheService.getScriptCache();
+    cache.put("room_" + code, JSON.stringify({ p0: empty, p1: empty, p2: empty, p3: empty, updatedAt: timestamp }), 21600);
+
+    const gridSheet = getOrCreateSheet(ss, SHEET_GRID, ["RoomCode", "P0", "P1", "P2", "P3", "UpdatedAt"]);
+    const gridRows = gridSheet.getDataRange().getValues();
+
+    for (let i = 1; i < gridRows.length; i++) {
+      if (gridRows[i][0].toString() === code) {
+        gridSheet.getRange(i + 1, 2, 1, 4).setValues([[emptyJson, emptyJson, emptyJson, emptyJson]]);
+        gridSheet.getRange(i + 1, 6).setValue(timestamp);
+        return createJsonResponse({ success: true, updatedAt: timestamp });
+      }
+    }
+
+    return createJsonResponse({ success: true, updatedAt: timestamp });
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function safeJsonParse(str, defaultVal) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    return defaultVal;
+  }
+}
+
 function getOrCreateSheet(ss, sheetName, headers) {
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
@@ -237,9 +268,6 @@ function getOrCreateSheet(ss, sheetName, headers) {
   return sheet;
 }
 
-/**
- * 回傳 JSON 給前端
- */
 function createJsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
