@@ -26,8 +26,10 @@ function doGet(e) {
       return createJsonResponse({ status: "ok", timestamp: Date.now() });
     }
 
-    // 1. 建立房間
+    // 1. 建立房間 (順便觸發自動清理超過 24 小時的陳舊房間)
     if (action === "create") {
+      cleanExpiredRooms(ss);
+
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       const pwd = params.pwd ? params.pwd.toString().trim() : Math.floor(1000 + Math.random() * 9000).toString();
       const nowIso = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
@@ -68,7 +70,19 @@ function doGet(e) {
 
       const cached = cache.get("room_" + code);
       if (cached) {
-        const parsed = JSON.parse(cached);
+        let parsed = JSON.parse(cached);
+
+        // 【超時自動歸零】：若該房間超過 2 小時完全無人活動，自動重置踏板為乾淨狀態
+        const TWO_HOURS = 2 * 60 * 60 * 1000;
+        if (parsed.updatedAt && (Date.now() - parsed.updatedAt > TWO_HOURS)) {
+          parsed.p0 = Array(10).fill(-1);
+          parsed.p1 = Array(10).fill(-1);
+          parsed.p2 = Array(10).fill(-1);
+          parsed.p3 = Array(10).fill(-1);
+          parsed.updatedAt = Date.now();
+          cache.put("room_" + code, JSON.stringify(parsed), 21600);
+        }
+
         return createJsonResponse({
           success: true,
           code: code,
@@ -367,3 +381,42 @@ function computePresence(cache, code, clientId, color) {
   cache.put(presenceKey, JSON.stringify(active), 60);
   return { count: Math.max(count, 1), charCounts: charCounts };
 }
+
+/**
+ * 自動清理超過 24 小時未活動的過期房間 (維持試算表輕量乾淨)
+ */
+function cleanExpiredRooms(ss) {
+  try {
+    const roomSheet = ss.getSheetByName(SHEET_ROOMS);
+    const gridSheet = ss.getSheetByName(SHEET_GRID);
+    if (!roomSheet || !gridSheet) return;
+
+    const now = Date.now();
+    const EXPIRATION_MS = 24 * 60 * 60 * 1000; // 24 小時
+
+    const roomData = roomSheet.getDataRange().getValues();
+    const expiredCodes = new Set();
+
+    // 倒序檢查並刪除，避免行號偏移
+    for (let i = roomData.length - 1; i >= 1; i--) {
+      const lastActiveStr = roomData[i][3]; // LastActive
+      const lastActiveTime = new Date(lastActiveStr).getTime();
+      if (!isNaN(lastActiveTime) && (now - lastActiveTime > EXPIRATION_MS)) {
+        expiredCodes.add(roomData[i][0].toString());
+        roomSheet.deleteRow(i + 1);
+      }
+    }
+
+    if (expiredCodes.size > 0) {
+      const gridData = gridSheet.getDataRange().getValues();
+      for (let i = gridData.length - 1; i >= 1; i--) {
+        if (expiredCodes.has(gridData[i][0].toString())) {
+          gridSheet.deleteRow(i + 1);
+        }
+      }
+    }
+  } catch (e) {
+    // 忽略清理過程中的次要錯誤
+  }
+}
+
